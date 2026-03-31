@@ -85,8 +85,32 @@ def parse_args():
     parser.add_argument(
         "--unfreeze_layers",
         type=int,
-        default=10,
+        default=4,
         help="Number of ResNet50V2 top layers to unfreeze in fine-tuning (smaller = less overfitting).",
+    )
+    parser.add_argument(
+        "--lnn_units",
+        type=str,
+        default="256,128",
+        help="Comma-separated Liquid layer units, e.g., '256,128'. Smaller head often generalizes better.",
+    )
+    parser.add_argument(
+        "--disable_model_augmentation",
+        action="store_true",
+        help="Disable in-model augmentation and rely only on tf.data augmentation (recommended for stability).",
+    )
+    parser.add_argument(
+        "--early_stop_metric",
+        type=str,
+        choices=["val_auc", "val_loss"],
+        default="val_auc",
+        help="Metric for EarlyStopping/ModelCheckpoint. val_auc often tracks generalization better on imbalanced labels.",
+    )
+    parser.add_argument(
+        "--label_smoothing",
+        type=float,
+        default=0.08,
+        help="Label smoothing for BCE/focal loss.",
     )
     parser.add_argument(
         "--loss",
@@ -103,6 +127,15 @@ def parse_args():
     )
     parser.add_argument("--no_tta", action="store_true", help="Disable test-time augmentation at evaluation.")
     return parser.parse_args()
+
+
+def _parse_lnn_units(units_text):
+    try:
+        units = tuple(int(x.strip()) for x in units_text.split(",") if x.strip())
+        units = tuple(u for u in units if u > 0)
+        return units if units else (256, 128)
+    except Exception:
+        return (256, 128)
 
 
 def main():
@@ -137,11 +170,25 @@ def main():
     )
 
     print("[2] Assembling Optimized Model Architecture...")
+    lnn_units = _parse_lnn_units(args.lnn_units)
+    monitor_metric = args.early_stop_metric
+    monitor_mode = "max" if monitor_metric == "val_auc" else "min"
+
     # 8 Classes per the Retinal dataset targets
-    model, last_conv_layer_name, base_cnn = build_concept_aware_lnn(input_shape=(224, 224, 3), num_classes=8)
+    model, last_conv_layer_name, base_cnn = build_concept_aware_lnn(
+        input_shape=(224, 224, 3),
+        num_classes=8,
+        lnn_units=lnn_units,
+        use_model_augmentation=not args.disable_model_augmentation,
+    )
+    print(
+        f"Architecture settings: lnn_units={lnn_units}, "
+        f"model_augmentation={'off' if args.disable_model_augmentation else 'on'}, "
+        f"early_stop_metric={monitor_metric}."
+    )
 
     # Loss: focal (default) or BCE, with class rebalancing on positives
-    label_smoothing = 0.12
+    label_smoothing = max(0.0, min(args.label_smoothing, 0.2))
     if args.no_class_weights:
         train_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=label_smoothing)
     else:
@@ -177,13 +224,13 @@ def main():
     )
     
     callbacks_warmup = [
-        EarlyStopping(monitor='val_loss', patience=4, restore_best_weights=True, mode='min'),
+        EarlyStopping(monitor=monitor_metric, patience=4, restore_best_weights=True, mode=monitor_mode),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-5),
         ModelCheckpoint(
             'models/warmup_best.weights.h5',
             save_best_only=True,
-            monitor='val_loss',
-            mode='min',
+            monitor=monitor_metric,
+            mode=monitor_mode,
             save_weights_only=True,
         )
     ]
@@ -224,13 +271,13 @@ def main():
     )
     
     callbacks_finetune = [
-        EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True, mode='min'),
+        EarlyStopping(monitor=monitor_metric, patience=6, restore_best_weights=True, mode=monitor_mode),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7),
         ModelCheckpoint(
             'models/concept_lnn_optimal.weights.h5',
             save_best_only=True,
-            monitor='val_loss',
-            mode='min',
+            monitor=monitor_metric,
+            mode=monitor_mode,
             save_weights_only=True,
         )
     ]

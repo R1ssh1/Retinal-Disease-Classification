@@ -115,7 +115,12 @@ def build_lnn_classifier(feature_dim, num_classes=8, lnn_units=(384, 192), name=
 # ---------------------------------------------------------------------------
 # Full model: CNN (feature extraction) → LNN (main model)
 # ---------------------------------------------------------------------------
-def build_concept_aware_lnn(input_shape=(224, 224, 3), num_classes=8):
+def build_concept_aware_lnn(
+    input_shape=(224, 224, 3),
+    num_classes=8,
+    lnn_units=(384, 192),
+    use_model_augmentation=True,
+):
     """
     Architecture:
     - CNN (ResNet50V2): feature extraction only.
@@ -124,7 +129,12 @@ def build_concept_aware_lnn(input_shape=(224, 224, 3), num_classes=8):
     Returns: (full_model, last_conv_layer_name, base_cnn) for training and Grad-CAM.
     """
     inputs = Input(shape=input_shape)
-    x = build_augmenter()(inputs)
+    x = inputs
+    if use_model_augmentation:
+        x = build_augmenter()(x)
+
+    # ResNet50V2 expects inputs in [-1, 1]. Data loader currently yields [0, 1].
+    x = Lambda(lambda t: (t * 2.0) - 1.0, name="resnetv2_input_scaling")(x)
 
     # 1) CNN feature extraction (single backbone in the graph)
     base_cnn = ResNet50V2(weights='imagenet', include_top=False, input_tensor=x)
@@ -141,7 +151,7 @@ def build_concept_aware_lnn(input_shape=(224, 224, 3), num_classes=8):
     lnn_head = build_lnn_classifier(
         feature_dim=feature_dim,
         num_classes=num_classes,
-        lnn_units=(384, 192),
+        lnn_units=lnn_units,
         name="lnn_classifier",
     )
     outputs = lnn_head(features)
