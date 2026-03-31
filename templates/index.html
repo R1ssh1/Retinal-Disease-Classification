@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Retinal screening — upload</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    .flash { background: #fff3cd; border: 1px solid #ffc107; padding: 0.75rem; margin-bottom: 1rem; border-radius: 6px; }
+    label { display: block; margin: 0.5rem 0 0.25rem; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
+    .hint { color: #555; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Fundus image screening (demo)</h1>
+  <p class="hint">Upload a retinal fundus image (PNG/JPEG). The model outputs probabilities for 8 ODIR-style labels and an explanation (Grad-CAM + text). Not a medical diagnosis.</p>
+  <p class="hint">Programmatic use: <code>POST /api/predict</code> with multipart field <code>image</code>, or JSON <code>{"image_base64": "…", "use_llm_api": false}</code>.</p>
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
+    {% endif %}
+  {% endwith %}
+  <form action="{{ url_for('predict') }}" method="post" enctype="multipart/form-data">
+    <label for="image">Image</label>
+    <input type="file" id="image" name="image" accept="image/png,image/jpeg,image/jpg" required>
+    <label>
+      <input type="checkbox" name="use_llm_api" value="1">
+      Enrich with OpenAI API (optional, requires <code>OPENAI_API_KEY</code>)
+    </label>
+    <button type="submit">Run model &amp; XAI</button>
+  </form>
+</body>
+</html>

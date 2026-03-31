@@ -7,6 +7,8 @@ import tensorflow as tf
 import cv2
 import matplotlib.pyplot as plt
 
+from src.llm_explanation import build_xai_text_report
+
 # Disease labels for plots (ODIR-5K)
 DISEASE_LABELS = ["N", "D", "G", "C", "A", "H", "M", "O"]
 
@@ -190,8 +192,10 @@ def run_full_explainability(model, last_conv_layer_name, X_test, output_dir="out
     shap_dir = os.path.join(output_dir, "shap")
     os.makedirs(gradcam_dir, exist_ok=True)
     os.makedirs(shap_dir, exist_ok=True)
+    xai_dir = os.path.join(output_dir, "xai")
+    os.makedirs(xai_dir, exist_ok=True)
 
-    # Grad-CAM
+    # Grad-CAM + text report (explains model output + what each map refers to)
     for i in range(min(n_gradcam, len(X_test))):
         img = X_test[i]
         batch = np.expand_dims(img, axis=0)
@@ -204,6 +208,17 @@ def run_full_explainability(model, last_conv_layer_name, X_test, output_dir="out
                 cam_path=os.path.join(gradcam_dir, f"gradcam_sample_{i}_class_{DISEASE_LABELS[pred_idx]}.jpg"),
                 pred_class=pred_idx
             )
+            report = build_xai_text_report(
+                preds[0],
+                threshold_positive=0.5,
+                gradcam_class_idx=pred_idx,
+                shap_class_idx=pred_idx,
+                sample_index=i,
+            )
+            report_path = os.path.join(xai_dir, f"explanation_sample_{i}.txt")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(report)
+            print(f"XAI text report saved: {report_path}")
         except Exception as e:
             print(f"Grad-CAM sample {i} failed: {e}")
 

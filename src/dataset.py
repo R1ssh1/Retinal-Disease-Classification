@@ -46,6 +46,17 @@ def load_odir_dataset(csv_path, img_dir, img_size=224, sample_fraction=1.0):
         raise ValueError("No images loaded! Please check your dataset path.")
     
     print(f"Successfully loaded {len(X)} images. Shape: X={X.shape}, y={y.shape}")
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Stratify by dominant label (argmax) so train/val class mix is similar — reduces overfitting to split luck
+    strat = None
+    if len(np.unique(np.argmax(y, axis=1))) > 1:
+        strat = np.argmax(y, axis=1)
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=strat
+        )
+    except ValueError:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
     return X_train, X_test, y_train, y_test

@@ -18,7 +18,11 @@ def _read_metrics(path):
     if not os.path.isfile(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        raw = json.load(f)
+    # New format: bundle with primary_reported_test_metrics
+    if isinstance(raw, dict) and "primary_reported_test_metrics" in raw:
+        return raw["primary_reported_test_metrics"]
+    return raw
 
 
 def _fmt(v):

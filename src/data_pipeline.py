@@ -14,8 +14,9 @@ def augment_image(img, label, training=True):
     img = tf.image.random_flip_up_down(img)
     img = tf.image.rot90(img, k=tf.random.uniform(shape=[], minval=0, maxval=4, dtype=tf.int32))
     # Brightness/contrast (fundus-safe ranges)
-    img = tf.image.random_brightness(img, max_delta=0.15)
-    img = tf.image.random_contrast(img, lower=0.85, upper=1.15)
+    img = tf.image.random_brightness(img, max_delta=0.18)
+    img = tf.image.random_contrast(img, lower=0.8, upper=1.2)
+    img = img + tf.random.normal(tf.shape(img), stddev=0.015)
     img = tf.clip_by_value(img, 0.0, 1.0)
     return img, label
 

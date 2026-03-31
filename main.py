@@ -7,7 +7,24 @@ from src.model import build_concept_aware_lnn
 from src.explainability import run_full_explainability
 from src.evaluation import run_full_evaluation
 from src.data_pipeline import build_tf_dataset, build_tf_dataset_val
+from sklearn.model_selection import train_test_split
+from src.losses import (
+    make_weighted_binary_crossentropy,
+    make_weighted_focal_loss,
+    compute_pos_weights,
+)
 import numpy as np
+
+
+def _split_train_val(X_train, y_train, val_fraction=0.15):
+    """Hold out a validation set from training data for early stopping and threshold tuning."""
+    strat = np.argmax(y_train, axis=1)
+    try:
+        return train_test_split(
+            X_train, y_train, test_size=val_fraction, random_state=42, stratify=strat
+        )
+    except ValueError:
+        return train_test_split(X_train, y_train, test_size=val_fraction, random_state=42)
 
 # Dataset paths: prefer local dataset/ (supports "ODIR-2 dataset" folder structure)
 _BASE = os.path.dirname(os.path.abspath(__file__))
@@ -60,6 +77,31 @@ def parse_args():
     parser.add_argument("--mock_data", action="store_true", help="Force synthetic mock data for smoke testing.")
     parser.add_argument("--skip_explainability", action="store_true", help="Skip Grad-CAM/SHAP generation.")
     parser.add_argument("--output_dir", type=str, default="outputs", help="Directory for evaluation and plots.")
+    parser.add_argument(
+        "--no_class_weights",
+        action="store_true",
+        help="Use plain BCE instead of class-balanced BCE (for ablation).",
+    )
+    parser.add_argument(
+        "--unfreeze_layers",
+        type=int,
+        default=10,
+        help="Number of ResNet50V2 top layers to unfreeze in fine-tuning (smaller = less overfitting).",
+    )
+    parser.add_argument(
+        "--loss",
+        type=str,
+        choices=["focal", "bce"],
+        default="focal",
+        help="focal = weighted focal loss (default, often better on imbalanced multi-label); bce = weighted BCE.",
+    )
+    parser.add_argument(
+        "--val_fraction",
+        type=float,
+        default=0.15,
+        help="Fraction of training split held out for validation + threshold tuning.",
+    )
+    parser.add_argument("--no_tta", action="store_true", help="Disable test-time augmentation at evaluation.")
     return parser.parse_args()
 
 
@@ -86,12 +128,32 @@ def main():
         print(f"Directory Loading Failed. Using Mock Data for system verification. (Error: {e})")
         X_train, X_test, y_train, y_test = setup_mock_data()
         
-    print(f"Dataset Split: Train={X_train.shape[0]} images, Test={X_test.shape[0]} images.\n")
+    print(f"Dataset Split: Train={X_train.shape[0]} images, Test={X_test.shape[0]} images.")
+
+    X_tr, X_val, y_tr, y_val = _split_train_val(X_train, y_train, val_fraction=args.val_fraction)
+    print(
+        f"Train/val (from train split): {X_tr.shape[0]} train, {X_val.shape[0]} val "
+        f"(val used for early stopping + per-class threshold tuning).\n"
+    )
 
     print("[2] Assembling Optimized Model Architecture...")
     # 8 Classes per the Retinal dataset targets
     model, last_conv_layer_name, base_cnn = build_concept_aware_lnn(input_shape=(224, 224, 3), num_classes=8)
-    
+
+    # Loss: focal (default) or BCE, with class rebalancing on positives
+    label_smoothing = 0.12
+    if args.no_class_weights:
+        train_loss = tf.keras.losses.BinaryCrossentropy(label_smoothing=label_smoothing)
+    else:
+        pos_w = compute_pos_weights(y_tr)
+        print(f"Class pos_weights (neg/pos, clipped): {np.round(pos_w, 2)}")
+        if args.loss == "focal":
+            train_loss = make_weighted_focal_loss(pos_w, gamma=2.0, label_smoothing=label_smoothing)
+            print("Using weighted focal loss (gamma=2).")
+        else:
+            train_loss = make_weighted_binary_crossentropy(pos_w, label_smoothing=label_smoothing)
+            print("Using weighted binary cross-entropy.")
+
     # Define optimization tracking metrics
     metrics = [
         tf.keras.metrics.BinaryAccuracy(name='accuracy'),
@@ -103,28 +165,33 @@ def main():
     # --- PHASE 1: WARM-UP (Train Only Custom Layers) ---
     print("\n[3] Phase 1: Warm-up Training (Freezing CNN Backbone)...")
     
-    # Regularization: label smoothing + optional weight decay via AdamW (set WEIGHT_DECAY=1e-4 to use)
-    weight_decay = float(os.environ.get("WEIGHT_DECAY", 0))
-    optimizer = (
-        tf.keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=weight_decay)
-        if weight_decay else tf.keras.optimizers.Adam(learning_rate=1e-3)
+    # Default AdamW weight decay reduces overfitting (override with WEIGHT_DECAY=0 to disable)
+    weight_decay = float(os.environ.get("WEIGHT_DECAY", "1e-4"))
+    optimizer = tf.keras.optimizers.AdamW(
+        learning_rate=1e-3, weight_decay=weight_decay, clipnorm=1.0
     )
     model.compile(
         optimizer=optimizer,
-        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1),
+        loss=train_loss,
         metrics=metrics
     )
     
     callbacks_warmup = [
-        EarlyStopping(monitor='val_auc', patience=5, restore_best_weights=True, mode='max'),
+        EarlyStopping(monitor='val_loss', patience=4, restore_best_weights=True, mode='min'),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=2, min_lr=1e-5),
-        ModelCheckpoint('models/warmup_best.h5', save_best_only=True, monitor='val_auc', mode='max')
+        ModelCheckpoint(
+            'models/warmup_best.weights.h5',
+            save_best_only=True,
+            monitor='val_loss',
+            mode='min',
+            save_weights_only=True,
+        )
     ]
 
     train_ds_warmup = build_tf_dataset(
-        X_train, y_train, batch_size=args.warmup_batch_size, shuffle=True, augment=True, repeat=False
+        X_tr, y_tr, batch_size=args.warmup_batch_size, shuffle=True, augment=True, repeat=False
     )
-    val_ds_warmup = build_tf_dataset_val(X_test, y_test, batch_size=args.warmup_batch_size)
+    val_ds_warmup = build_tf_dataset_val(X_val, y_val, batch_size=args.warmup_batch_size)
 
     history_warmup = model.fit(
         train_ds_warmup,
@@ -140,33 +207,38 @@ def main():
     # Unfreeze the base CNN
     base_cnn.trainable = True
     
-    # Freeze the bottom layers and leave the top few unlocked for fine-tuning
-    # E.g., unfreeze the last block
-    for layer in base_cnn.layers[:-20]: # Keep first layers frozen
+    # Freeze the bottom layers and leave the top few unlocked for fine-tuning (fewer layers = less overfitting)
+    n_unfreeze = max(1, min(args.unfreeze_layers, len(base_cnn.layers)))
+    for layer in base_cnn.layers[:-n_unfreeze]:
         layer.trainable = False
         
-    print(f"Unfrozen the last {len(base_cnn.layers) - len(base_cnn.layers[:-20])} layers of ResNet50V2 for fine-tuning.")
+    print(f"Unfrozen the last {n_unfreeze} layers of ResNet50V2 for fine-tuning.")
     
-    optimizer_ft = (
-        tf.keras.optimizers.AdamW(learning_rate=1e-5, weight_decay=weight_decay)
-        if weight_decay else tf.keras.optimizers.Adam(learning_rate=1e-5)
+    optimizer_ft = tf.keras.optimizers.AdamW(
+        learning_rate=1e-5, weight_decay=weight_decay, clipnorm=1.0
     )
     model.compile(
         optimizer=optimizer_ft,
-        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.1),
+        loss=train_loss,
         metrics=metrics
     )
     
     callbacks_finetune = [
-        EarlyStopping(monitor='val_auc', patience=8, restore_best_weights=True, mode='max'),
+        EarlyStopping(monitor='val_loss', patience=6, restore_best_weights=True, mode='min'),
         ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-7),
-        ModelCheckpoint('models/concept_lnn_optimal.h5', save_best_only=True, monitor='val_auc', mode='max')
+        ModelCheckpoint(
+            'models/concept_lnn_optimal.weights.h5',
+            save_best_only=True,
+            monitor='val_loss',
+            mode='min',
+            save_weights_only=True,
+        )
     ]
 
     train_ds_finetune = build_tf_dataset(
-        X_train, y_train, batch_size=args.finetune_batch_size, shuffle=True, augment=True, repeat=False
+        X_tr, y_tr, batch_size=args.finetune_batch_size, shuffle=True, augment=True, repeat=False
     )
-    val_ds_finetune = build_tf_dataset_val(X_test, y_test, batch_size=args.finetune_batch_size)
+    val_ds_finetune = build_tf_dataset_val(X_val, y_val, batch_size=args.finetune_batch_size)
 
     # We resume training
     history_finetune = model.fit(
@@ -177,7 +249,7 @@ def main():
         verbose=1
     )
     
-    print("\n[5] Optimal Model Saved to 'models/concept_lnn_optimal.h5'")
+    print("\n[5] Optimal weights saved to 'models/concept_lnn_optimal.weights.h5'")
 
     print("\n[6] Running Full Evaluation (metrics + visualizations)...")
     run_full_evaluation(
@@ -187,6 +259,9 @@ def main():
         history_warmup=_merge_histories(history_warmup, history_finetune),
         history_finetune=None,
         output_dir=args.output_dir,
+        X_val=X_val,
+        y_val=y_val,
+        use_tta=not args.no_tta,
     )
 
     if not args.skip_explainability:

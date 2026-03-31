@@ -78,7 +78,7 @@ def build_cnn_feature_extractor(input_shape=(224, 224, 3), name="cnn_feature_ext
     last_conv_layer = base_cnn.get_layer('post_relu')
     features = GlobalAveragePooling2D(name="cnn_gap")(last_conv_layer.output)
     features = BatchNormalization(name="cnn_bn")(features)
-    features = Dropout(0.3, name="cnn_dropout")(features)
+    features = Dropout(0.4, name="cnn_dropout")(features)
 
     cnn_model = Model(inputs=base_cnn.input, outputs=features, name=name)
     return cnn_model, last_conv_layer.name, base_cnn
@@ -87,23 +87,28 @@ def build_cnn_feature_extractor(input_shape=(224, 224, 3), name="cnn_feature_ext
 # ---------------------------------------------------------------------------
 # 2) Liquid Neural Network – main model (feature vector → class logits)
 # ---------------------------------------------------------------------------
-def build_lnn_classifier(feature_dim, num_classes=8, lnn_units=(512, 256), name="lnn_classifier"):
+def build_lnn_classifier(feature_dim, num_classes=8, lnn_units=(384, 192), name="lnn_classifier"):
     """
     LNN head: takes CNN feature vector and outputs multi-label predictions.
     Uses a stack of LiquidCell layers as the main reasoning model.
     """
     inputs = Input(shape=(feature_dim,), name="feature_input")
     x = BatchNormalization(name="lnn_bn_in")(inputs)
-    x = Dropout(0.3, name="lnn_drop_in")(x)
+    x = Dropout(0.45, name="lnn_drop_in")(x)
 
     # Main model: stack of Liquid (LTC) layers. Each RNN needs (batch, timesteps, features).
     for i, units in enumerate(lnn_units):
         x_seq = Lambda(lambda t: tf.expand_dims(t, axis=1), name=f"to_seq_{i}")(x)
         x = RNN(LiquidCell(units), name=f"liquid_layer_{i}")(x_seq)
         x = BatchNormalization(name=f"lnn_bn_{i}")(x)
-        x = Dropout(0.4, name=f"lnn_drop_{i}")(x)
+        x = Dropout(0.5, name=f"lnn_drop_{i}")(x)
 
-    outputs = Dense(num_classes, activation='sigmoid', name='disease_predictions')(x)
+    outputs = Dense(
+        num_classes,
+        activation="sigmoid",
+        name="disease_predictions",
+        kernel_regularizer=l2(1e-4),
+    )(x)
     return Model(inputs=inputs, outputs=outputs, name=name)
 
 
@@ -129,15 +134,15 @@ def build_concept_aware_lnn(input_shape=(224, 224, 3), num_classes=8):
 
     features = GlobalAveragePooling2D(name="cnn_gap")(last_conv.output)
     features = BatchNormalization(name="cnn_bn")(features)
-    features = Dropout(0.3, name="cnn_dropout")(features)
+    features = Dropout(0.4, name="cnn_dropout")(features)
 
     # 2) LNN main model (classification head). ResNet50V2 GAP output dim is 2048.
     feature_dim = int(features.shape[-1]) if features.shape[-1] is not None else 2048
     lnn_head = build_lnn_classifier(
         feature_dim=feature_dim,
         num_classes=num_classes,
-        lnn_units=(512, 256),
-        name="lnn_classifier"
+        lnn_units=(384, 192),
+        name="lnn_classifier",
     )
     outputs = lnn_head(features)
 

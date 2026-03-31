@@ -1,7 +1,7 @@
 """
 Generate natural-language explanation for a single fundus image (SDP Future Work – LLM).
 Usage:
-  python scripts/generate_explanation.py --image path/to/image.jpg --model models/concept_lnn_optimal.h5
+  python scripts/generate_explanation.py --image path/to/image.jpg --model models/concept_lnn_optimal.weights.h5
 """
 import os
 import sys
@@ -15,7 +15,11 @@ import cv2
 import tensorflow as tf
 
 from src.model import build_concept_aware_lnn
-from src.llm_explanation import generate_explanation_for_image, generate_explanation
+from src.llm_explanation import (
+    generate_explanation_for_image,
+    generate_explanation,
+    build_xai_text_report,
+)
 
 
 def load_image(path, size=224):
@@ -31,8 +35,14 @@ def load_image(path, size=224):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", type=str, required=True, help="Path to fundus image")
-    parser.add_argument("--model", type=str, default=os.path.join(ROOT, "models", "concept_lnn_optimal.h5"))
+    parser.add_argument("--model", type=str, default=os.path.join(ROOT, "models", "concept_lnn_optimal.weights.h5"))
     parser.add_argument("--use_api", action="store_true", help="Use OpenAI API for richer explanation (set OPENAI_API_KEY)")
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="Save full XAI text report to this file (default: outputs/xai/single_image_explanation.txt)",
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.image):
@@ -50,8 +60,24 @@ def main():
     batch = load_image(args.image)
     explanation, probs = generate_explanation_for_image(model, batch)
     text = generate_explanation(probs, use_api=args.use_api)
-    print("\n--- Explanation ---\n")
-    print(text)
+    pred_idx = int(np.argmax(probs))
+    full_report = build_xai_text_report(
+        probs,
+        threshold_positive=0.5,
+        gradcam_class_idx=pred_idx,
+        shap_class_idx=pred_idx,
+        sample_index=None,
+    )
+    out_path = args.out or os.path.join(ROOT, "outputs", "xai", "single_image_explanation.txt")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(full_report)
+        if args.use_api:
+            f.write("\n\n--- Optional API text ---\n")
+            f.write(text)
+    print("\n--- Full XAI report (model output + what Grad-CAM/SHAP refer to) ---\n")
+    print(full_report)
+    print(f"\nSaved: {out_path}")
     return 0
 
 

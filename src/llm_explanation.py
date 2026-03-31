@@ -7,6 +7,8 @@ Produces natural-language explanations for model predictions using:
 import os
 import re
 
+import numpy as np
+
 # ODIR disease names for readable explanations
 DISEASE_NAMES = {
     "N": "No abnormality",
@@ -91,3 +93,90 @@ def generate_explanation_for_image(model, image_batch, class_names=LABELS):
     preds = model.predict(image_batch, verbose=0)
     probs = preds[0]
     return generate_explanation(probs, use_api=False), probs
+
+
+def build_xai_text_report(
+    pred_probs,
+    threshold_positive=0.5,
+    gradcam_class_idx=None,
+    shap_class_idx=None,
+    sample_index=None,
+):
+    """
+    Human-readable XAI report that ties **model output** to **what each visualization explains**.
+
+    pred_probs: length-8 sigmoid probabilities (N, D, G, C, A, H, M, O).
+    gradcam_class_idx / shap_class_idx: which output neuron the heatmaps refer to (usually argmax or clinician-chosen).
+    """
+    pred_probs = list(np.asarray(pred_probs, dtype=np.float64).flatten()[:8])
+    lines = []
+    title = "=== Retinal screening model — explanation of output ==="
+    if sample_index is not None:
+        title += f" (sample {sample_index})"
+    lines.append(title)
+    lines.append("")
+    lines.append("1) MODEL OUTPUT (probability per condition, 0–100%)")
+    lines.append("   Codes: N=Normal, D=Diabetic Retinopathy, G=Glaucoma, C=Cataract,")
+    lines.append("          A=AMD, H=Hypertension, M=Myopia, O=Other")
+    lines.append("")
+    for i, lbl in enumerate(LABELS):
+        name = DISEASE_NAMES.get(lbl, lbl)
+        pct = round(100.0 * float(pred_probs[i]), 1)
+        flag = "  [above threshold]" if pred_probs[i] >= threshold_positive else ""
+        lines.append(f"   • {lbl} ({name}): {pct}%{flag}")
+    lines.append("")
+    pos = [
+        (LABELS[i], pred_probs[i], DISEASE_NAMES.get(LABELS[i], LABELS[i]))
+        for i in range(len(LABELS))
+        if pred_probs[i] >= threshold_positive
+    ]
+    if pos:
+        lines.append(
+            f"2) INTERPRETATION: conditions at or above {threshold_positive:.0%} probability (multi-label possible)"
+        )
+        for lbl, p, name in sorted(pos, key=lambda x: -x[1]):
+            lines.append(f"   • {name} ({lbl}): {round(100 * p, 1)}%")
+    else:
+        lines.append(
+            f"2) INTERPRETATION: no condition reaches {threshold_positive:.0%}; report highest scores only."
+        )
+        top = sorted(
+            [(LABELS[i], pred_probs[i], DISEASE_NAMES.get(LABELS[i], LABELS[i])) for i in range(len(LABELS))],
+            key=lambda x: -x[1],
+        )[:3]
+        for lbl, p, name in top:
+            lines.append(f"   • {name} ({lbl}): {round(100 * p, 1)}%")
+    lines.append("")
+    lines.append("3) GRAD-CAM (spatial explanation)")
+    if gradcam_class_idx is not None and 0 <= gradcam_class_idx < len(LABELS):
+        gl = LABELS[gradcam_class_idx]
+        gname = DISEASE_NAMES.get(gl, gl)
+        lines.append(
+            f"   The heatmap shows **where** the network focused for output neuron "
+            f"'{gl}' ({gname}) — i.e., regions that most influenced that score."
+        )
+        lines.append(
+            "   Compare the overlay to optic disc, vessels, and macula in the fundus image."
+        )
+    else:
+        lines.append("   (No class index provided for Grad-CAM.)")
+    lines.append("")
+    lines.append("4) SHAP (attribution explanation)")
+    if shap_class_idx is not None and 0 <= shap_class_idx < len(LABELS):
+        sl = LABELS[shap_class_idx]
+        sname = DISEASE_NAMES.get(sl, sl)
+        lines.append(
+            f"   The map summarizes **pixel-level contributions** toward neuron '{sl}' ({sname})."
+        )
+        lines.append("   Higher intensity ≈ stronger push toward that class in this sample.")
+    else:
+        lines.append("   (No class index provided for SHAP.)")
+    lines.append("")
+    lines.append("5) SUMMARY (template)")
+    lines.append(_template_explanation(pred_probs, top_k=4, threshold=0.25))
+    lines.append("")
+    lines.append(
+        "Disclaimer: This is an AI screening aid, not a diagnosis. "
+        "Clinical correlation by an ophthalmologist is required."
+    )
+    return "\n".join(lines)

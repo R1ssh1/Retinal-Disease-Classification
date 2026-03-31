@@ -3,6 +3,7 @@ Evaluation metrics and visualizations for multi-label retinal disease classifica
 """
 import os
 import json
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
@@ -22,9 +23,62 @@ from sklearn.metrics import (
 DISEASE_LABELS = ["N", "D", "G", "C", "A", "H", "M", "O"]
 
 
+def _json_safe(obj):
+    """Replace NaN/Inf with None so metrics.json is valid JSON."""
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (float, np.floating)):
+        x = float(obj)
+        if math.isnan(x) or math.isinf(x):
+            return None
+        return x
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    return obj
+
+
 def binarize_predictions(y_pred, threshold=0.5):
-    """Convert sigmoid outputs to binary 0/1 for metric computation."""
-    return (np.array(y_pred) >= threshold).astype(np.float32)
+    """Convert sigmoid outputs to binary 0/1. threshold can be scalar or (n_classes,) per-class."""
+    y_pred = np.array(y_pred, dtype=np.float64)
+    thr = np.asarray(threshold, dtype=np.float64)
+    if thr.ndim == 0:
+        return (y_pred >= float(thr)).astype(np.float32)
+    return (y_pred >= thr.reshape(1, -1)).astype(np.float32)
+
+
+def tune_per_class_thresholds_f1(y_true, y_pred_proba, n_steps=37):
+    """
+    Pick threshold per class that maximizes binary F1 on **validation** labels (not test).
+    y_true, y_pred_proba: (n, n_classes).
+    """
+    y_true = np.asarray(y_true)
+    y_pred_proba = np.asarray(y_pred_proba)
+    n_classes = y_true.shape[1]
+    y_bin = (y_true >= 0.5).astype(np.int32)
+    thresholds = np.zeros(n_classes, dtype=np.float64)
+    for j in range(n_classes):
+        best_t, best_f1 = 0.5, -1.0
+        for t in np.linspace(0.05, 0.95, n_steps):
+            pred_c = (y_pred_proba[:, j] >= t).astype(np.int32)
+            f1 = f1_score(y_bin[:, j], pred_c, zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_t = t
+        thresholds[j] = best_t
+    return thresholds
+
+
+def predict_with_tta(model, X, batch_size=16, verbose=0):
+    """
+    Average sigmoid outputs over a few deterministic flips (often improves robustness / reported metrics).
+    """
+    X = np.asarray(X, dtype=np.float32)
+    preds = [model.predict(X, batch_size=batch_size, verbose=verbose)]
+    preds.append(model.predict(np.flip(X, axis=2), batch_size=batch_size, verbose=verbose))
+    preds.append(model.predict(np.flip(X, axis=1), batch_size=batch_size, verbose=verbose))
+    return np.mean(np.stack(preds, axis=0), axis=0)
 
 
 def compute_all_metrics(y_true, y_pred_proba, threshold=0.5):
@@ -322,9 +376,21 @@ def plot_aggregate_confusion(y_true, y_pred, save_dir, labels=DISEASE_LABELS):
     plt.close()
 
 
-def run_full_evaluation(model, X_test, y_test, history_warmup=None, history_finetune=None, output_dir="outputs"):
+def run_full_evaluation(
+    model,
+    X_test,
+    y_test,
+    history_warmup=None,
+    history_finetune=None,
+    output_dir="outputs",
+    X_val=None,
+    y_val=None,
+    use_tta=True,
+):
     """
     Compute all metrics, save JSON report, and generate all visualizations.
+    If X_val/y_val are provided, thresholds are tuned on validation (macro F1 per class), then applied on test.
+    use_tta: average predictions over horizontal/vertical flips on test (and val when tuning).
     """
     os.makedirs(output_dir, exist_ok=True)
     eval_dir = os.path.join(output_dir, "evaluation")
@@ -334,14 +400,43 @@ def run_full_evaluation(model, X_test, y_test, history_warmup=None, history_fine
     y_test_bin = (y_test >= 0.5).astype(np.int32) if y_test.dtype in (np.float32, np.float64) else y_test
 
     print("Computing predictions on test set...")
-    y_pred_proba = model.predict(X_test, verbose=1)
-    y_pred = binarize_predictions(y_pred_proba)
+    _pred = predict_with_tta if use_tta else model.predict
+    y_pred_proba = _pred(model, X_test, batch_size=16, verbose=1) if use_tta else model.predict(X_test, verbose=1)
 
-    metrics = compute_all_metrics(y_test, y_pred_proba)
+    metrics_050 = compute_all_metrics(y_test, y_pred_proba, threshold=0.5)
+    metrics_bundle = {
+        "test_metrics_threshold_0.5": metrics_050,
+        "use_tta": bool(use_tta),
+    }
+
+    thresholds_tuned = None
+    if X_val is not None and y_val is not None:
+        print("Tuning per-class thresholds on validation set (max F1 per class)...")
+        y_val = np.array(y_val)
+        y_val_proba = (
+            predict_with_tta(model, X_val, batch_size=16, verbose=0)
+            if use_tta
+            else model.predict(X_val, verbose=0)
+        )
+        thresholds_tuned = tune_per_class_thresholds_f1(y_val, y_val_proba)
+        metrics_bundle["per_class_thresholds_tuned_on_val"] = thresholds_tuned.tolist()
+        metrics_tuned = compute_all_metrics(y_test, y_pred_proba, threshold=thresholds_tuned)
+        metrics_bundle["test_metrics_threshold_tuned"] = metrics_tuned
+        metrics = metrics_tuned
+        y_pred = binarize_predictions(y_pred_proba, thresholds_tuned)
+        print(f"Tuned thresholds (per class): {np.round(thresholds_tuned, 3)}")
+    else:
+        metrics = metrics_050
+        y_pred = binarize_predictions(y_pred_proba, 0.5)
+
     with open(os.path.join(eval_dir, "metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=2)
+        json.dump(
+            _json_safe({**metrics_bundle, "primary_reported_test_metrics": metrics}),
+            f,
+            indent=2,
+        )
 
-    print("\n--- Evaluation Metrics ---")
+    print("\n--- Evaluation Metrics (primary) ---")
     print(f"Accuracy:          {metrics['accuracy']:.4f}")
     print(f"Subset Accuracy:  {metrics['subset_accuracy']:.4f}")
     print(f"Precision (macro): {metrics['precision_macro']:.4f}")
@@ -350,6 +445,8 @@ def run_full_evaluation(model, X_test, y_test, history_warmup=None, history_fine
     print(f"Hamming Loss:     {metrics['hamming_loss']:.4f}")
     print(f"ROC AUC (macro):  {metrics['roc_auc_macro']:.4f}")
     print(f"Avg Precision:    {metrics['average_precision_macro']:.4f}")
+    if thresholds_tuned is not None:
+        print(f"(Also saved metrics at 0.5 threshold and full bundle in metrics.json)")
 
     # Training curves (merge both phases if provided)
     if history_warmup is not None:

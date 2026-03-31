@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Retinal screening — results</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #ccc; padding: 0.4rem 0.6rem; text-align: left; }
+    th { background: #f5f5f5; }
+    pre { white-space: pre-wrap; background: #f8f9fa; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: 0.9rem; }
+    .cam { max-width: 100%; height: auto; border-radius: 6px; border: 1px solid #ddd; }
+    a { color: #0d6efd; }
+  </style>
+</head>
+<body>
+  <p><a href="{{ url_for('index') }}">← Upload another image</a></p>
+  <h1>Model output</h1>
+  <p>Argmax (single reference class for Grad-CAM): <strong>{{ argmax_code }}</strong></p>
+  <table>
+    <thead><tr><th>Label</th><th>Probability</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr><td>{{ r.code }}</td><td>{{ "%.4f"|format(r.prob) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if gradcam_b64 %}
+  <h2>Grad-CAM</h2>
+  <p class="hint">Spatial focus for the argmax class (see XAI report below).</p>
+  <img class="cam" src="data:image/jpeg;base64,{{ gradcam_b64 }}" alt="Grad-CAM visualization">
+  {% endif %}
+
+  <h2>XAI report</h2>
+  <pre>{{ xai_report }}</pre>
+
+  <h2>Natural-language summary{% if use_api %} (with optional API){% endif %}</h2>
+  <pre>{{ extra_explanation }}</pre>
+</body>
+</html>

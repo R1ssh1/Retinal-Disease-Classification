@@ -37,7 +37,7 @@ def load_saved_model(model_path, input_shape=(224, 224, 3), num_classes=8):
 
 def main():
     parser = argparse.ArgumentParser(description="Cross-dataset evaluation")
-    parser.add_argument("--model", type=str, default=os.path.join(ROOT, "models", "concept_lnn_optimal.h5"))
+    parser.add_argument("--model", type=str, default=os.path.join(ROOT, "models", "concept_lnn_optimal.weights.h5"))
     parser.add_argument("--csv", type=str, default=None, help="Path to CSV (ODIR format with filename, target)")
     parser.add_argument("--img_dir", type=str, default=None, help="Path to image directory")
     parser.add_argument("--output_dir", type=str, default=os.path.join(ROOT, "outputs", "cross_dataset"))
